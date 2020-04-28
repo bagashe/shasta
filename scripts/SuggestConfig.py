@@ -115,7 +115,7 @@ def runThisConfig(shastaBinaryPath,
 
     configFlags = ' '.join(overrideParams)
     command = """
-    {} --input {} --assemblyDirectory {} {}
+    {} --input {} --Align.alignMethod 3 --assemblyDirectory {} {}
     """.format(
         shastaBinaryPath,
         inputFilePath,
