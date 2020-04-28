@@ -14,7 +14,8 @@ helpMessage = """
 This script will take as input
 1. A file containing reads in the fasta format
 2. A file containing the reference assembly
-and it will run a few experiments to find a good Shasta config.
+and it will assemle using different configurations, use QUAST to do analysis and generate
+a tsv file summarizing all the runs for the given sample.
 
 Usage:
     SuggestConfig.py input.fasta reference.fasta
@@ -46,10 +47,11 @@ def getReferenceStats(referenceFilePath):
     total = sum(referenceLengths)
     return(total)
 
-def processQuastReport(reportSummaries, overrideParams, quastReportFilePath):
+def processQuastReport(reportSummaries, overrideParams, quastReportFilePath, assemblyTime, analysisTime):
     keysToExtract = {
         "Genome fraction (%)",
         "NG50",
+        "NGA50",
         "# misassemblies",
         "# mismatches per 100 kbp",
         "# indels per 100 kbp"
@@ -69,12 +71,27 @@ def processQuastReport(reportSummaries, overrideParams, quastReportFilePath):
                 continue
             reportDict[key] = float(value)
     
+    reportDict['Assembly Time (s)'] = assemblyTime
+    reportDict['Analysis Time (s)'] = analysisTime
+
+    print(reportDict)
     reportSummaries.append(reportDict)
     return
 
 def writeSummaries(reportSummaries, reportFilePath):
     keys = reportSummaries[0].keys()
-    keys = sorted(keys)
+    configKeys = []
+    qaKeys = []
+    for key in keys:
+        if '.' in key:
+            configKeys.append(key)
+        else:
+            qaKeys.append(key)
+    
+    configKeys = sorted(configKeys)
+    qaKeys = sorted(qaKeys)
+    keys = configKeys + qaKeys
+
     header = '\t'.join(keys)
     with open(reportFilePath, 'w') as fp:
         fp.write('{}\n'.format(header))
@@ -102,25 +119,32 @@ def getParamLists(paramDict):
         lists.append(values)
     return lists
 
+def runCommand(command):
+    command = command + " >> ./stdout 2>> ./stderr"
+    print('Running: ' + command)
+    os.system(command)
+
 
 def runThisConfig(shastaBinaryPath,
     inputFilePath,
     referenceFilePath,
     workingDirPath,
     overrideParams,
-    reportSummaries,
-    totalAssemblyTime,
-    totalQATime):
+    reportSummaries):
 
     assemblyDirPath = '{}/assembly'.format(workingDirPath)
     assemblyPath = '{}/Assembly.fasta'.format(assemblyDirPath)
 
-    os.system('rm -rf {}'.format(assemblyDirPath))
+    runCommand('rm -rf {}'.format(assemblyDirPath))
 
     configFlags = ' '.join(overrideParams)
-    command = """
-    {} --input {} --Align.alignMethod 3 --assemblyDirectory {} {}
-    """.format(
+    # command = '{} --input {} --Align.alignMethod 3 --assemblyDirectory {} {}'.format(
+    #     shastaBinaryPath,
+    #     inputFilePath,
+    #     assemblyDirPath,
+    #     configFlags
+    # )
+    command = '{} --input {} --Align.alignMethod 3 --assemblyDirectory {} {}'.format(
         shastaBinaryPath,
         inputFilePath,
         assemblyDirPath,
@@ -128,26 +152,26 @@ def runThisConfig(shastaBinaryPath,
     )
 
     begin = datetime.datetime.now()
-    os.system(command)
+    runCommand(command)
     end = datetime.datetime.now()
-    totalAssemblyTime = totalAssemblyTime + (end - begin).seconds
+    assemblyTime = (end - begin).seconds
 
     quastDirPath = '{}/quast_results'.format(workingDirPath)
-    quast_command = """
-    quast.py --large --threads {} --min-identity 80 -r {} -o {} {}
-    """.format(
+    quast_command = 'quast.py --large --threads {} --min-identity 80 -r {} -o {} {}'.format(
         multiprocessing.cpu_count(),
         referenceFilePath,
         quastDirPath,
         assemblyPath
     )
     begin = datetime.datetime.now()
-    os.system(quast_command)
+    runCommand(quast_command)
     end = datetime.datetime.now()
-    totalQATime = totalQATime + (end - begin).seconds
+    analysisTime = (end - begin).seconds
 
     quastReportFilePath = '{}/quast_results/report.tsv'.format(workingDirPath)
-    processQuastReport(reportSummaries, overrideParams, quastReportFilePath)
+    processQuastReport(reportSummaries, overrideParams, quastReportFilePath, assemblyTime, analysisTime)
+
+    return((assemblyTime, analysisTime))
 
 
 def main():
@@ -170,9 +194,6 @@ def main():
     if not os.path.isfile(referenceFilePath):
         print("File path {} does not exist. Exiting...".format(referenceFilePath))
     
-    # List of Quast report summaries along with their corresponding shasta config overrides.
-    reportSummaries = []
-
     (readTotal, percentiles) = getReadStats(inputFilePath)
     referenceTotal = getReferenceStats(referenceFilePath)
 
@@ -181,50 +202,67 @@ def main():
 
     paramUniverse = {}
     paramUniverse['Reads.minReadLength'] = [
-        math.floor(percentiles[0]), # 10th percentile
-        math.floor(percentiles[1]), # 20th percentile
-        math.floor(percentiles[2]), # 30th percentile
         10000, # Default value
+        1000,
+        2000,
+        5000,
     ]
-    paramUniverse['Kmers.k'] = [
-        9,
-        10, # Default value
-    ]
-
-    # This can be a function of read lengths & Kmers.k??
-    paramUniverse['MinHash.m'] = [
-        3,
-        4, # Default value
-        5,
+    paramUniverse['Align.minAlignedMarkerCount'] = [
+        100, # Default value
+        50,
     ]
     paramUniverse['MinHash.alignmentCandidatesPerRead'] = [
-        15,
         20, # Default value
+        15,
         25,
     ]
-    
+    paramUniverse['Align.minAlignedFraction'] = [
+        0.0, # Default value
+        0.1,
+        0.2
+    ]
+
+    # paramUniverse['Kmers.k'] = [
+    #     9,
+    #     10, # Default value
+    # ]
+
+    # # This can be a function of read lengths & Kmers.k??
+    # paramUniverse['MinHash.m'] = [
+    #     3,
+    #     4, # Default value
+    #     5,
+    # ]
+        
     # Generate all possible combinations of param values.
-    overrideParamCombos = itertools.product(*getParamLists(paramUniverse))
-    
+    overrideParamCombos = list(itertools.product(*getParamLists(paramUniverse)))
+    print('{} total assemblies will be done'.format(len(overrideParamCombos)))
+
+    # List of Quast report summaries along with their corresponding shasta config overrides.
+    reportSummaries = []
+
     totalAssemblyTime = 0
-    totalQATime = 0
+    totalAnalysisTime = 0
+    index = 0
     for overrideParams in overrideParamCombos:
-        runThisConfig(
+        print('Running assembly {} of {}'.format(index + 1, len(overrideParamCombos)))
+        (assemblyTime, analysisTime) = runThisConfig(
             shastaBinaryPath,
             inputFilePath,
             referenceFilePath,
             'workingDir',
             overrideParams,
-            reportSummaries,
-            totalAssemblyTime,
-            totalQATime
+            reportSummaries
         )
+        totalAssemblyTime = totalAssemblyTime + assemblyTime
+        totalAnalysisTime = totalAnalysisTime + analysisTime
+        index = index + 1
 
-    reportFilePath = '{}-summary.tsv'.format(os.path.basename(inputFilePath).split('.')[0])            
+    reportFilePath = 'workingDir/{}-summary.tsv'.format(os.path.basename(inputFilePath).split('.')[0])            
     writeSummaries(reportSummaries, reportFilePath)
 
     print("Total Assembly time = {} s".format(totalAssemblyTime))
-    print("Total QA time = {} s".format(totalQATime))
+    print("Total Analysis time = {} s".format(totalAnalysisTime))
 
     # Upload summary to s3.
     # s3_client = boto3.client('s3')
