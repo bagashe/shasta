@@ -4,6 +4,7 @@ import os
 import sys
 import math
 import copy
+import itertools
 import multiprocessing
 import numpy as np
 
@@ -28,21 +29,22 @@ def getReadStats(inputFilePath):
             readLengths.append(len(line))
 
     percentiles = np.percentile(readLengths, [10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
-    return(percentiles)
+    total = sum(readLengths)
+    return(total, percentiles)
 
 
 def getReferenceStats(referenceFilePath):
-    readLengths = []
+    referenceLengths = []
     with open(referenceFilePath) as fp:
         for line in fp:
             if line[0] == '>':
                 continue
-            readLengths.append(len(line))
+            referenceLengths.append(len(line))
     
-    total = sum(readLengths)
+    total = sum(referenceLengths)
     return(total)
 
-def processQuastReport(reportSummaries, configParams, quastReportFilePath):
+def processQuastReport(reportSummaries, overrideParams, quastReportFilePath):
     keysToExtract = {
         "Genome fraction (%)",
         "NG50",
@@ -50,6 +52,12 @@ def processQuastReport(reportSummaries, configParams, quastReportFilePath):
         "# mismatches per 100 kbp",
         "# indels per 100 kbp"
     }
+    configParams = {}
+    for p in overrideParams:
+        (k, v) = p.split()
+        k = k.strip('-')
+        configParams[k] = v
+
     reportDict = copy.deepcopy(configParams)
     with open(quastReportFilePath) as fp:
         for line in fp:
@@ -77,11 +85,27 @@ def writeSummaries(reportSummaries, reportFilePath):
     return
 
 
+def getParamLists(paramDict):
+    """
+    Values in paramDict are arrays. This method explodes and flattens as follows ...
+    E.g. paramDict = {'x': [1,2,3], 'y': [4,5]}
+    is converted to
+    [['--x 1', '--x 2', '--x 3'], ['--y 4', '--y 5']]
+    """
+    lists = []
+    for (k, vArr) in paramDict.items():
+        values = []
+        for v in vArr:
+            values.append("--{} {}".format(k, v))
+        lists.append(values)
+    return lists
+
+
 def runThisConfig(shastaBinaryPath,
     inputFilePath,
     referenceFilePath,
     workingDirPath,
-    configParams,
+    overrideParams,
     reportSummaries):
 
     assemblyDirPath = '{}/assembly'.format(workingDirPath)
@@ -89,14 +113,14 @@ def runThisConfig(shastaBinaryPath,
 
     os.system('rm -rf {}'.format(assemblyDirPath))
 
+    configFlags = ' '.join(overrideParams)
     command = """
-    {} --input {} --assemblyDirectory {}  --Reads.minReadLength {} --Align.minAlignedMarkerCount {}
+    {} --input {} --assemblyDirectory {} {}
     """.format(
         shastaBinaryPath,
         inputFilePath,
         assemblyDirPath,
-        configParams['Reads.minReadLength'],
-        configParams['Align.minAlignedMarkerCount']
+        configFlags
     )
     os.system(command)
 
@@ -112,7 +136,7 @@ def runThisConfig(shastaBinaryPath,
     os.system(quast_command)
 
     quastReportFilePath = '{}/quast_results/report.tsv'.format(workingDirPath)
-    processQuastReport(reportSummaries, configParams, quastReportFilePath)
+    processQuastReport(reportSummaries, overrideParams, quastReportFilePath)
 
 
 def main():
@@ -138,30 +162,36 @@ def main():
     # List of Quast report summaries along with their corresponding shasta config overrides.
     reportSummaries = []
 
-    readStats = getReadStats(inputFilePath)
-    # referenceStats = getReferenceStats(referenceFilePath)
+    (readTotal, percentiles) = getReadStats(inputFilePath)
+    referenceTotal = getReferenceStats(referenceFilePath)
+
+    coverage = float(readTotal) / float(referenceTotal)
+    # Use coverage for coming up with parameter ranges for some params!
 
     paramUniverse = {}
     paramUniverse['Reads.minReadLength'] = [
-        math.floor(readStats[0]), # 10th percentile
-        math.floor(readStats[1]), # 20th percentile
-        math.floor(readStats[2]), # 30th percentile
+        math.floor(percentiles[0]), # 10th percentile
+        math.floor(percentiles[1]), # 20th percentile
+        math.floor(percentiles[2]), # 30th percentile
+        10000, # Default value
+    ]
+    paramUniverse['Kmers.k'] = [
+        9,
+        10, # Default value
     ]
     
-    for rl in paramUniverse['Reads.minReadLength']:
-        for markerCountDivisor in [90, 100, 110]: 
-            configParams = {}
-            configParams['Reads.minReadLength'] = rl
-            configParams['Align.minAlignedMarkerCount'] = math.floor(rl/markerCountDivisor)
-
-            runThisConfig(
-                shastaBinaryPath,
-                inputFilePath,
-                referenceFilePath,
-                'workingDir',
-                configParams,
-                reportSummaries
-            )
+    # Generate all possible combinations of param values.
+    overrideParamCombos = itertools.product(*getParamLists(paramUniverse))
+    
+    for overrideParams in overrideParamCombos:
+        runThisConfig(
+            shastaBinaryPath,
+            inputFilePath,
+            referenceFilePath,
+            'workingDir',
+            overrideParams,
+            reportSummaries
+        )
 
     reportFilePath = 'summary.tsv'            
     writeSummaries(reportSummaries, reportFilePath)
