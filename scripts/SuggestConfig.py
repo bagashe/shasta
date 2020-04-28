@@ -179,6 +179,13 @@ def main():
         9,
         10, # Default value
     ]
+
+    # This can be a function of read lengths & Kmers.k??
+    paramUniverse['MinHash.alignmentCandidatesPerRead'] = [
+        15,
+        20, # Default value
+        25,
+    ]
     
     # Generate all possible combinations of param values.
     overrideParamCombos = itertools.product(*getParamLists(paramUniverse))
