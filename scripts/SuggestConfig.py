@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+import boto3
+import datetime
 import os
 import sys
 import math
@@ -106,7 +108,9 @@ def runThisConfig(shastaBinaryPath,
     referenceFilePath,
     workingDirPath,
     overrideParams,
-    reportSummaries):
+    reportSummaries,
+    totalAssemblyTime,
+    totalQATime):
 
     assemblyDirPath = '{}/assembly'.format(workingDirPath)
     assemblyPath = '{}/Assembly.fasta'.format(assemblyDirPath)
@@ -122,7 +126,11 @@ def runThisConfig(shastaBinaryPath,
         assemblyDirPath,
         configFlags
     )
+
+    begin = datetime.datetime.now()
     os.system(command)
+    end = datetime.datetime.now()
+    totalAssemblyTime = totalAssemblyTime + (end - begin).seconds
 
     quastDirPath = '{}/quast_results'.format(workingDirPath)
     quast_command = """
@@ -133,7 +141,10 @@ def runThisConfig(shastaBinaryPath,
         quastDirPath,
         assemblyPath
     )
+    begin = datetime.datetime.now()
     os.system(quast_command)
+    end = datetime.datetime.now()
+    totalQATime = totalQATime + (end - begin).seconds
 
     quastReportFilePath = '{}/quast_results/report.tsv'.format(workingDirPath)
     processQuastReport(reportSummaries, overrideParams, quastReportFilePath)
@@ -181,6 +192,11 @@ def main():
     ]
 
     # This can be a function of read lengths & Kmers.k??
+    paramUniverse['MinHash.m'] = [
+        3,
+        4, # Default value
+        5,
+    ]
     paramUniverse['MinHash.alignmentCandidatesPerRead'] = [
         15,
         20, # Default value
@@ -190,6 +206,8 @@ def main():
     # Generate all possible combinations of param values.
     overrideParamCombos = itertools.product(*getParamLists(paramUniverse))
     
+    totalAssemblyTime = 0
+    totalQATime = 0
     for overrideParams in overrideParamCombos:
         runThisConfig(
             shastaBinaryPath,
@@ -197,12 +215,25 @@ def main():
             referenceFilePath,
             'workingDir',
             overrideParams,
-            reportSummaries
+            reportSummaries,
+            totalAssemblyTime,
+            totalQATime
         )
 
-    reportFilePath = 'summary.tsv'            
+    reportFilePath = '{}-summary.tsv'.format(os.path.basename(inputFilePath).split('.')[0])            
     writeSummaries(reportSummaries, reportFilePath)
 
+    print("Total Assembly time = {} s".format(totalAssemblyTime))
+    print("Total QA time = {} s".format(totalQATime))
+
+    # Upload summary to s3.
+    # s3_client = boto3.client('s3')
+    # try:
+    #     response = s3_client.upload_file(reportFilePath, 'czi.bhal-public', os.path.basename(reportFilePath))
+    # except ClientError as e:
+    #     print(e)
+    
+    return
 
 
 if __name__ == '__main__':
